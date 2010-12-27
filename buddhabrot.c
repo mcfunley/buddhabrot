@@ -5,7 +5,7 @@
 #include "tiffio.h"
 
 
-#define ITERATIONS 4000
+#define ITERATIONS 20000
 #define SCALE 2
 #define WIDTH 1440 * SCALE
 #define HEIGHT 900 * SCALE
@@ -32,6 +32,9 @@ typedef struct _bb {
 
     // The maximal value in the plot array. 
     long long max;
+
+    // The mean value in the plot array, for values not in the mandelbrot set.  
+    long long mean;
 
     int width;
     int height;
@@ -88,9 +91,38 @@ int rgb(double r, double g, double b) {
  * Gets the color to plot given a counter value. 
  */
 int getcolor(buddha* b, int count) {
-    double a = (double)count / b->max;
-    double a2 = a*a, a3 = a2*a;
-    return rgb(a3, a3, a);
+    // Most (say, 99%) of the points are going to fall below 0.15*max. So 
+    // there needs to be a significant amount of color variation in that
+    // range. 
+    if(count == 0) {
+        return 0;
+    }
+
+    double twentieth = (double)b->max / 20, c = (double)count;
+    double a;
+    if(count < twentieth) {
+        // counts between 0-5% of max: half through full blue
+        a = c / twentieth / 2;
+        return rgb(0, 0, 0.5+a);
+    }
+    if(count < twentieth*2) {
+        // counts between 5-10% of max: full blue through full purple
+        a = (c - twentieth) / twentieth;
+        return rgb(a, 0, 1);
+    }
+    if(count < twentieth*3) {
+        // counts between 10-15% of max: full purple through full red
+        a = (c - twentieth*2) / twentieth;
+        return rgb(1, 0, 1-a);
+    }
+    if(count < twentieth*10) {
+        // counts between 15-50% of max: full red through full yellow
+        a = (c - twentieth*3) / (twentieth*7);
+        return rgb(1, a, 0);
+    }
+    // counts between 50-100% of max: full yellow through white
+    a = (c - twentieth*10) / (twentieth*10);
+    return rgb(1, 1, a);
 }
 
 
@@ -197,7 +229,8 @@ void buddha_plot_callback(buddha* b, complex double z) {
 /**
  * Performs a second iteration for each point in the image that is not 
  * in the Mandelbrot set. At each iteration the value of z is counted
- * using buddha_plot_callback. 
+ * using buddha_plot_callback. This also computes and sets the structure's
+ * mean field. 
  */
 void buddha_plot_escapes(buddha* b) {
     int x, y;
@@ -209,6 +242,61 @@ void buddha_plot_escapes(buddha* b) {
             }
         }
     }
+
+    // compute the mean field in the plot array. 
+    int sum = 0, i = 0, n = 0;
+    for(i = 0; i <= b->max_offs; i++) {
+        if(b->plot[i]) {
+            sum += b->plot[i];
+            n++;
+        }
+    }
+    b->mean = sum / n;
+}
+
+
+/**
+ * Prints out overall stats and a text histogram of the plot counts. 
+ */
+void buddha_print_stats(buddha* b) {
+    printf("Iterations: %d\n", b->iterations);
+    printf("Dimensions: %dx%dpx\n", b->width, b->height);
+    printf("Mean count: %lld\n", b->mean);
+    printf("Max count: %lld\n", b->max);
+
+    int ranges[20] = {0};
+    double twentieth = (double)b->max / 20;
+    int i = 0, n = 0;
+    for(; i <= b->max_offs; i++) {
+        int c = b->plot[i];
+        if(c != 0) {
+            int j = 1;
+            for(; j <= 20; j++) {
+                if(c < twentieth*j) {
+                    break;
+                }
+            }
+
+            n++;
+            ranges[j-1]++;
+        }
+    }
+
+    double pct_escaped = (double)n / b->max_offs * 100;
+    printf("Escaping points: %d (%.2f%%)\n", n, pct_escaped);
+
+    printf("\n");
+    float cum_pct = 0;
+    for(i = 0; i< 20; i++) {
+        int low = twentieth*i;
+        int hi = twentieth*(i+1);
+        int c = ranges[i];
+        float pct = (float)c / n * 100;
+        cum_pct += pct;
+        printf("%2d %4d   - %4d %15d  %3.2f  %3.2f\n", 
+               i+1, low, hi, c, pct, cum_pct);
+    }
+    printf("\n");
 }
 
 
@@ -269,6 +357,7 @@ int main() {
     buddha_init(&b, WIDTH, HEIGHT, ITERATIONS, 0);
 
     buddha_calculate(&b);
+    buddha_print_stats(&b);
     
     write_tiff(b.im);
     buddha_free(&b);
