@@ -5,8 +5,8 @@
 #include "tiffio.h"
 
 
-#define ITERATIONS 20000
-#define SCALE 2
+#define ITERATIONS 40000
+#define SCALE 4
 #define WIDTH 1440 * SCALE
 #define HEIGHT 900 * SCALE
 
@@ -31,10 +31,26 @@ typedef struct _bb {
     char* im;
 
     // The maximal value in the plot array. 
-    long long max;
+    int max;
 
+    // Contains an entry for each count up to max, and stores the number of 
+    // times that count appears. This information is important in choosing 
+    // color ranges. 
+    // 
+    // (The max increases with iterations, but it tends to stay under a few 
+    // thousand even up to high numbers.)
+    int* count_frequency; 
+
+    // The number of points in the image that escaped. 
+    int num_escaped;
+
+    // Divides the count space into percentiles. 10% of counts are below 
+    // percentile_limit[0], 20% of counts are below percentile_limit[1], 
+    // and so on. 
+    int percentile_limit[10];
+    
     // The mean value in the plot array, for values not in the mandelbrot set.  
-    long long mean;
+    int mean;
 
     int width;
     int height;
@@ -57,6 +73,9 @@ void buddha_init(buddha* b, int width, int height, int iterations, int nebula) {
     b->iterations = iterations;
     b->max_offs = width * height - 1;
     b->nebula = nebula;
+
+    // This will be allocated later when we know what the max is. 
+    b->count_frequency = NULL;
 }
 
 
@@ -67,6 +86,10 @@ void buddha_free(buddha* b) {
     free(b->escapes);
     free(b->plot);
     free(b->im);
+
+    if(b->count_frequency) {
+        free(b->count_frequency);
+    }
 }
 
 
@@ -87,42 +110,68 @@ int rgb(double r, double g, double b) {
 }
 
 
+int rank_in_percentile(buddha* b, int lo, int hi, int c) {
+    double cl = b->percentile_limit[lo], 
+        ch = b->percentile_limit[hi];
+    return ((double)c - cl) / (ch - cl);
+}
+
+
 /**
  * Gets the color to plot given a counter value. 
  */
 int getcolor(buddha* b, int count) {
-    // Most (say, 99%) of the points are going to fall below 0.15*max. So 
-    // there needs to be a significant amount of color variation in that
-    // range. 
+    // Points not visited are black. 
     if(count == 0) {
         return 0;
     }
 
-    double twentieth = (double)b->max / 20, c = (double)count;
+    // Almost all of the points are going to have relatively low counts. If we 
+    // just color the image with a simple range based on the count, it will get
+    // darker and darker with more iterations. So we have to apply the 
+    // colors where the variation actually exists, and adjust things as 
+    // different dimensions and iteration settings produce different results.
     double a;
-    if(count < twentieth) {
-        // counts between 0-5% of max: half through full blue
-        a = c / twentieth / 2;
-        return rgb(0, 0, 0.5+a);
+
+    // bottom 20% of counts are blue
+    if(count <= b->percentile_limit[1]) {
+        a = rank_in_percentile(b, 0, 1, count);
+        return rgb(0, 0, a);
     }
-    if(count < twentieth*2) {
-        // counts between 5-10% of max: full blue through full purple
-        a = (c - twentieth) / twentieth;
+
+    // 20th through 30th percentiles are between blue and purple
+    if(count <= b->percentile_limit[2]) {
+        a = rank_in_percentile(b, 1, 2, count);
         return rgb(a, 0, 1);
     }
-    if(count < twentieth*3) {
-        // counts between 10-15% of max: full purple through full red
-        a = (c - twentieth*2) / twentieth;
+
+    // 30th through 50th percentiles are between purple and red
+    if(count <= b->percentile_limit[4]) {
+        a = rank_in_percentile(b, 2, 4, count);
         return rgb(1, 0, 1-a);
     }
-    if(count < twentieth*10) {
-        // counts between 15-50% of max: full red through full yellow
-        a = (c - twentieth*3) / (twentieth*7);
+
+    // 50th through 60th percentiles are between red and yellow
+    if(count <= b->percentile_limit[5]) {
+        a = rank_in_percentile(b, 4, 5, count);
         return rgb(1, a, 0);
     }
-    // counts between 50-100% of max: full yellow through white
-    a = (c - twentieth*10) / (twentieth*10);
-    return rgb(1, 1, a);
+
+    // 60th through 70th percentiles are between yellow and green
+    if(count <= b->percentile_limit[6]) {
+        a = rank_in_percentile(b, 5, 6, count);
+        return rgb(1-a, 1, 0);
+    }
+
+    // 70th through 80th percentiles are between green and cyan
+    if(count < b->percentile_limit[7]) {
+        a = rank_in_percentile(b, 6, 7, count);
+        return rgb(0, 1, a);
+    }
+
+    // 80th through 100th percentiles are between cyan and white
+    a = rank_in_percentile(b, 7, 9, count);
+    return rgb(a, 1, 1);
 }
 
 
@@ -242,16 +291,6 @@ void buddha_plot_escapes(buddha* b) {
             }
         }
     }
-
-    // compute the mean field in the plot array. 
-    int sum = 0, i = 0, n = 0;
-    for(i = 0; i <= b->max_offs; i++) {
-        if(b->plot[i]) {
-            sum += b->plot[i];
-            n++;
-        }
-    }
-    b->mean = sum / n;
 }
 
 
@@ -261,8 +300,8 @@ void buddha_plot_escapes(buddha* b) {
 void buddha_print_stats(buddha* b) {
     printf("Iterations: %d\n", b->iterations);
     printf("Dimensions: %dx%dpx\n", b->width, b->height);
-    printf("Mean count: %lld\n", b->mean);
-    printf("Max count: %lld\n", b->max);
+    printf("Mean count: %d\n", b->mean);
+    printf("Max count: %d\n", b->max);
 
     int ranges[20] = {0};
     double twentieth = (double)b->max / 20;
@@ -285,9 +324,9 @@ void buddha_print_stats(buddha* b) {
     double pct_escaped = (double)n / b->max_offs * 100;
     printf("Escaping points: %d (%.2f%%)\n", n, pct_escaped);
 
-    printf("\n");
+    printf("\nHistogram:\n");
     float cum_pct = 0;
-    for(i = 0; i< 20; i++) {
+    for(i = 0; i < 20; i++) {
         int low = twentieth*i;
         int hi = twentieth*(i+1);
         int c = ranges[i];
@@ -295,6 +334,11 @@ void buddha_print_stats(buddha* b) {
         cum_pct += pct;
         printf("%2d %4d   - %4d %15d  %3.2f  %3.2f\n", 
                i+1, low, hi, c, pct, cum_pct);
+    }
+
+    printf("\nPercentile limits:\n");
+    for(i = 0; i < 10; i++) {
+        printf("%2d%%  %d\n", (i+1)*10, b->percentile_limit[i]);
     }
     printf("\n");
 }
@@ -318,11 +362,51 @@ void buddha_draw(buddha* b) {
 
 
 /**
+ * Walks through the plot, calculating the mean value and keeping track 
+ * of how often each count appears. 
+ *
+ * This allocates the count_frequency field. 
+ */
+void buddha_compute_stats(buddha* b) {
+    int i = 0, sum = 0, n = 0;
+    b->count_frequency = (int*)malloc(sizeof(int) * b->max);
+    for(; i <= b->max_offs; i++) {
+        int c = b->plot[i];
+        if(c) {
+            b->count_frequency[c]++;
+            n++;
+            sum += c;
+        }
+    }
+    b->mean = (double)sum / n;
+    b->num_escaped = n;
+
+    // Calculate the maximal count in for each tenth percentile.
+    double d = (double)n / 10, lim = d;
+    int cum_freq = 0, p = 0;
+    for(i = 0; i < b->max; i++) {
+        cum_freq += b->count_frequency[i];
+        if(cum_freq > lim) {
+            b->percentile_limit[p++] = i;
+            lim += d;
+        }
+        if(p == 10) {
+            break;
+        }
+    }
+
+    // hardcode the 100th percentile to be the max
+    b->percentile_limit[9] = b->max;
+}
+
+
+/**
  * Computes and renders the buddhabrot image. 
  */
 void buddha_calculate(buddha* b) {
     buddha_calc_escapes(b);
     buddha_plot_escapes(b);
+    buddha_compute_stats(b);
     buddha_draw(b);
 }
 
