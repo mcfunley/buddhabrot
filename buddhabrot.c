@@ -17,7 +17,7 @@
 
 
 /**
- * Struct that maintains context for the fractal during a rendering run. 
+ * Struct that maintains context for the plot during a rendering run. 
  */
 typedef struct _bb {
     // Map of points that escape (ie those not in the Mandelbrot set). 
@@ -232,7 +232,7 @@ void putpixel(buddha* b, int c, int x, int y) {
 
 
 /**
- * Performs the first pass of rendering the fractal. This computes which points 
+ * Performs the first pass of rendering. This computes which points 
  * in the image are not in the Mandelbrot set. 
  */
 void buddha_calc_escapes(buddha* b) {
